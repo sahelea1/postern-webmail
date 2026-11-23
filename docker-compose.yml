@@ -1,0 +1,62 @@
+# Postern behind an existing Traefik that handles TLS and ACME.
+#
+#   cp .env.example .env      # set POSTERN_HOST and your Traefik names
+#   docker compose up -d --build
+#   docker compose exec postern /postern admin-link   # then add your mail server
+#
+# Traefik reaches the container over the shared network named in
+# TRAEFIK_NETWORK; nothing is published to the internet by this file.
+
+name: postern
+
+services:
+  postern:
+    build: .
+    image: postern:0.1.2
+    restart: unless-stopped
+    environment:
+      # Take the visitor's address from Traefik's X-Forwarded-For header.
+      # Needed for the sign-in rate limit; only safe because Traefik is the
+      # sole way in.
+      POSTERN_TRUST_PROXY: "1"
+      POSTERN_BRAND: ${POSTERN_BRAND:-Postern}
+      POSTERN_SESSION_HOURS: ${POSTERN_SESSION_HOURS:-168}
+      POSTERN_MAX_UPLOAD_MB: ${POSTERN_MAX_UPLOAD_MB:-25}
+      POSTERN_LOG: ${POSTERN_LOG:-info}
+    volumes:
+      # Holds servers.toml and the cookie sealing key. No mail, no passwords.
+      - postern-data:/data
+    ports:
+      # Admin console: reachable from the Docker host only. From your laptop:
+      #   ssh -L 8081:127.0.0.1:8081 your-host   then open the admin link.
+      - "127.0.0.1:${POSTERN_ADMIN_PORT:-8081}:8081"
+    networks:
+      - proxy
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: ${POSTERN_MEM_LIMIT:-512m}
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:-proxy}
+      - traefik.http.routers.postern.rule=Host(`${POSTERN_HOST:?set POSTERN_HOST in .env}`)
+      - traefik.http.routers.postern.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.postern.tls=true
+      - traefik.http.routers.postern.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.routers.postern.service=postern
+      - traefik.http.services.postern.loadbalancer.server.port=8080
+      # Optional: a per-address request limit in front of Postern.
+      # - traefik.http.middlewares.postern-ratelimit.ratelimit.average=50
+      # - traefik.http.middlewares.postern-ratelimit.ratelimit.burst=100
+      # - traefik.http.routers.postern.middlewares=postern-ratelimit
+
+networks:
+  proxy:
+    external: true
+    name: ${TRAEFIK_NETWORK:-proxy}
+
+volumes:
+  postern-data:

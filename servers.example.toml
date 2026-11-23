@@ -1,0 +1,27 @@
+# Mail servers and the domains allowed to sign in. This file lives in the data
+# directory as servers.toml. The admin console writes it for you; editing it
+# by hand works too (restart afterwards, or use `postern check` first).
+
+# An IMAP + SMTP server.
+[[server]]
+id = "main"
+name = "Example Mail"
+domains = ["example.com", "example.org"]   # "*.example.com" for subdomains, "*" for any
+protocol = "imap"
+imap_host = "mail.example.com"
+imap_port = 993
+imap_security = "tls"          # tls | starttls | none
+smtp_host = "mail.example.com"
+smtp_port = 465
+smtp_security = "tls"          # tls | starttls | none
+username = "email"             # email: sign in with the full address; local: the part before @
+save_sent = true               # false for servers that file sent mail themselves (Gmail)
+remote_images = "ask"          # ask | never
+
+# A JMAP server (for example Stalwart).
+# [[server]]
+# id = "stalwart"
+# name = "Stalwart"
+# domains = ["example.net"]
+# protocol = "jmap"
+# jmap_url = "https://mail.example.net"

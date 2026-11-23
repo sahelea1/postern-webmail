@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Build the web client
+        working-directory: web
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          node build.mjs
+          npx tsc --noEmit -p .
+
+      - name: Rust toolchain
+        run: |
+          rustup update stable
+          rustup default stable
+          rustc --version
+
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Unit tests
+        run: cargo test --release --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install the test servers
+        run: pip install -r tests/requirements.txt
+
+      - name: End-to-end over IMAP and SMTP
+        run: tests/e2e.sh imap
+
+      - name: End-to-end over JMAP
+        run: tests/e2e.sh jmap
+
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build
+        run: docker build -t postern:ci .
+
+      - name: Start it the way the Compose file does
+        run: |
+          docker run -d --name postern --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            -p 127.0.0.1:8080:8080 postern:ci
+
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz; then break; fi
+            sleep 1
+          done
+          echo
+          curl -fsS http://127.0.0.1:8080/api/config
+          echo
+          curl -fsS -o /dev/null http://127.0.0.1:8080/
+          docker exec postern /postern version
+          docker exec postern /postern healthcheck
+          docker image ls postern:ci
+
+      - name: Logs
+        if: always()
+        run: docker logs postern || true
+
+  chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CHART: deploy/helm/postern
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Lint
+        run: helm lint "$CHART" --set ingress.host=webmail.example.com
+
+      - name: Render with an existing ClusterIssuer
+        run: |
+          helm template webmail "$CHART" --namespace mail \
+            --set ingress.host=webmail.example.com \
+            --set ingress.className=traefik \
+            --set ingress.tls.clusterIssuer=letsencrypt-prod > /dev/null
+
+      - name: Render with a chart-made Issuer, admin console and persistence
+        run: |
+          helm template webmail "$CHART" --namespace mail \
+            --set ingress.host=webmail.example.com \
+            --set acme.createIssuer=true \
+            --set acme.email=admin@example.com \
+            --set admin.enabled=true \
+            --set servers= \
+            --set persistence.enabled=true > /dev/null
+
+      - name: Render with an existing key Secret
+        run: |
+          helm template webmail "$CHART" --namespace mail \
+            --set ingress.host=webmail.example.com \
+            --set secretKey.existingSecret=postern-key > /dev/null
+
+      - name: A chart-made Issuer without an email address must be refused
+        run: |
+          if helm template webmail "$CHART" --set ingress.host=webmail.example.com \
+               --set acme.createIssuer=true > /dev/null 2>&1; then
+            echo "expected an error" >&2
+            exit 1
+          fi

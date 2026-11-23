@@ -1,0 +1,20 @@
+{{- if .Values.acme.createIssuer }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "postern.issuerName" . }}
+  labels:
+    {{- include "postern.labels" . | nindent 4 }}
+spec:
+  acme:
+    server: {{ .Values.acme.server | quote }}
+    email: {{ required "acme.email is required when acme.createIssuer is true" .Values.acme.email | quote }}
+    privateKeySecretRef:
+      name: {{ include "postern.issuerName" . }}-account
+    solvers:
+      - http01:
+          ingress:
+            {{- with (default .Values.ingress.className .Values.acme.ingressClass) }}
+            ingressClassName: {{ . | quote }}
+            {{- end }}
+{{- end }}

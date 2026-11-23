@@ -1,0 +1,22 @@
+Postern {{ .Chart.AppVersion }} is installed as "{{ include "postern.fullname" . }}".
+
+{{- if .Values.ingress.enabled }}
+
+Webmail:  http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
+{{- if and .Values.ingress.tls.enabled (not .Values.acme.createIssuer) (not .Values.ingress.tls.clusterIssuer) }}
+
+No cert-manager issuer is set. The Ingress expects a TLS secret named
+"{{ include "postern.tlsSecretName" . }}", or your ingress controller's own ACME support.
+{{- end }}
+{{- end }}
+{{- if .Values.admin.enabled }}
+
+Admin console:
+  kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ include "postern.fullname" . }} 8081:8081
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "postern.fullname" . }} -- /postern admin-link
+{{- end }}
+{{- if not .Values.servers }}
+
+No mail servers are configured in the values. Nobody can sign in until one is
+added{{ if .Values.admin.enabled }} in the admin console{{ else }} (set `servers` or enable the admin console){{ end }}.
+{{- end }}

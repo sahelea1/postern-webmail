@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "postern.fullname" . }}
+  labels:
+    {{- include "postern.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    {{- if .Values.persistence.enabled }}
+    type: Recreate
+    {{- else }}
+    type: RollingUpdate
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "postern.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "postern.labels" . | nindent 8 }}
+      annotations:
+        checksum/servers: {{ .Values.servers | sha256sum | quote }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postern
+          image: {{ printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["run"]
+          env:
+            - name: POSTERN_LISTEN
+              value: "0.0.0.0:8080"
+            - name: POSTERN_ADMIN_LISTEN
+              value: {{ ternary "127.0.0.1:8081" "off" .Values.admin.enabled | quote }}
+            - name: POSTERN_DATA_DIR
+              value: /data
+            - name: POSTERN_TRUST_PROXY
+              value: {{ ternary "1" "0" .Values.trustProxy | quote }}
+            - name: POSTERN_BRAND
+              value: {{ .Values.brand | quote }}
+            - name: POSTERN_SESSION_HOURS
+              value: {{ .Values.sessionHours | quote }}
+            - name: POSTERN_MAX_UPLOAD_MB
+              value: {{ .Values.maxUploadMb | quote }}
+            - name: POSTERN_LOG
+              value: {{ .Values.logLevel | quote }}
+            {{- if .Values.servers }}
+            - name: POSTERN_SERVERS_FILE
+              value: /config/servers.toml
+            {{- end }}
+            - name: POSTERN_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "postern.secretName" . }}
+                  key: secret-key
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- if .Values.servers }}
+            - name: servers
+              mountPath: /config
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-data" (include "postern.fullname" .)) .Values.persistence.existingClaim }}
+          {{- else }}
+          emptyDir:
+            sizeLimit: 16Mi
+          {{- end }}
+        {{- if .Values.servers }}
+        - name: servers
+          configMap:
+            name: {{ include "postern.fullname" . }}-servers
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,9 @@
+target
+web/node_modules
+web/dist
+data
+deploy
+tests
+*.md
+.git
+.env

@@ -1,0 +1,95 @@
+# ---- image -----------------------------------------------------------------
+# Build the image from this repository and push it to a registry
+# your cluster can pull from:
+#   docker build -t registry.example.com/postern:0.1.2 . && docker push registry.example.com/postern:0.1.2
+image:
+  repository: registry.example.com/postern
+  tag: ""               # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# One replica is the tested setup. More work too (sessions live in the
+# browser's cookie), but the sign-in rate limit and sign-out list are per pod.
+replicaCount: 1
+
+# ---- application -----------------------------------------------------------
+brand: Postern
+sessionHours: 168       # how long a sign-in lasts
+maxUploadMb: 25         # total attachment size per message
+logLevel: info          # error | warn | info | debug
+trustProxy: true        # take the visitor's address from X-Forwarded-For (set by the ingress controller)
+
+# Mail servers and the domains allowed to sign in, in the servers.toml format
+# (see servers.example.toml). Stored in a ConfigMap; a change restarts the pod.
+servers: |
+  [[server]]
+  id = "main"
+  name = "Example Mail"
+  domains = ["example.com"]
+  protocol = "imap"
+  imap_host = "mail.example.com"
+  imap_port = 993
+  imap_security = "tls"
+  smtp_host = "mail.example.com"
+  smtp_port = 465
+  smtp_security = "tls"
+
+# The key that seals session cookies: 64 hex characters (openssl rand -hex 32).
+# Empty: the chart creates one on first install and keeps it on upgrades.
+# With GitOps tools that render without cluster access (Argo CD, `helm
+# template`), set existingSecret, otherwise every sync signs everyone out.
+secretKey:
+  existingSecret: ""    # name of a Secret holding the key under "secret-key"
+  value: ""
+
+# Admin console inside the pod, on loopback only. Reach it with
+#   kubectl port-forward deploy/<release>-postern 8081:8081
+#   kubectl exec deploy/<release>-postern -- /postern admin-link
+# To let the console change the server list, set `servers: ""` and enable
+# persistence; with `servers` set above, the console is read-only.
+admin:
+  enabled: false
+
+# Only needed when the admin console manages the server list.
+persistence:
+  enabled: false
+  size: 100Mi
+  storageClass: ""
+  existingClaim: ""
+
+# ---- network ---------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 80
+
+# The reverse proxy in front of Postern.
+ingress:
+  enabled: true
+  className: ""         # e.g. traefik or nginx; empty uses the cluster default
+  host: webmail.example.com
+  annotations: {}
+  tls:
+    enabled: true
+    secretName: ""      # defaults to <release>-postern-tls
+    # ACME through cert-manager: name an existing ClusterIssuer here ...
+    clusterIssuer: ""   # e.g. letsencrypt-prod
+
+# ... or let the chart create a Let's Encrypt Issuer in this namespace
+# (cert-manager must be installed in the cluster either way).
+acme:
+  createIssuer: false
+  email: ""             # required when createIssuer is true
+  server: https://acme-v02.api.letsencrypt.org/directory
+  ingressClass: ""      # class that answers the HTTP-01 challenge; defaults to ingress.className
+
+# ---- pod -------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 20m
+    memory: 48Mi
+  limits:
+    memory: 512Mi
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

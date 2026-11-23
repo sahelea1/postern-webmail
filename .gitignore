@@ -1,0 +1,22 @@
+# Build output
+/target
+/web/node_modules
+/web/dist
+
+# Runtime data: server list, cookie key, admin token
+/data
+secret.key
+admin.token
+
+# Local settings. Copy .env.example to .env; never commit the copy.
+.env
+.env.*
+!.env.example
+
+# Tests and editors
+__pycache__/
+*.pyc
+.DS_Store
+
+# Your own server list (the example file is servers.example.toml)
+/servers.toml
