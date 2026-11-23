@@ -43,7 +43,7 @@ def env(docs):
 docs, notes = render({})
 assert set(docs) == {"ConfigMap", "Deployment", "Ingress", "Secret", "Service"}, set(docs)
 dep, c = docs["Deployment"], container(docs)
-assert c["image"] == "registry.example.com/postern:0.1.2", c["image"]
+assert c["image"] == "registry.example.com/postern:0.2.0", c["image"]
 assert c["securityContext"] == {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}}
 pod = dep["spec"]["template"]["spec"]
 assert pod["securityContext"]["runAsNonRoot"] is True and pod["securityContext"]["runAsUser"] == 65532

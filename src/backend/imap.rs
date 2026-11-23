@@ -66,8 +66,18 @@ impl Pool {
             .clone()
     }
 
+    /// Drops the session's connection at once. The polite LOGOUT runs in the
+    /// background with a short limit, so signing out never waits on the server.
     pub fn forget(&self, key: &str) {
-        self.slots.lock().unwrap().remove(key);
+        let Some(slot) = self.slots.lock().unwrap().remove(key) else {
+            return;
+        };
+        tokio::spawn(async move {
+            let mut s = slot.lock().await;
+            if let Some(mut sess) = s.sess.take() {
+                let _ = timeout(Duration::from_secs(3), sess.logout()).await;
+            }
+        });
     }
 
     /// Closes connections that have not been used for a while.

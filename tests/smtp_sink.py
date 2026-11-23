@@ -4,8 +4,9 @@ recipient's IMAP inbox. Lets the end-to-end tests send a message and read it bac
 usage: smtp_sink.py <smtp-port> <imap-port> <user> <password> <log-file> [cert key]
 
 With a certificate and key the server offers STARTTLS and refuses AUTH before it.
+With SINK_DIR set, every message is also written there as N.eml, byte for byte.
 """
-import asyncio, imaplib, json, sys, time
+import asyncio, imaplib, json, os, sys, time
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import AuthResult, LoginPassword
 
@@ -19,6 +20,11 @@ class Handler:
     async def handle_DATA(self, server, session, envelope):
         with open(log, "a") as f:
             f.write(json.dumps({"from": envelope.mail_from, "rcpt": envelope.rcpt_tos, "size": len(envelope.content)}) + "\n")
+        if os.environ.get("SINK_DIR"):
+            d = os.environ["SINK_DIR"]
+            n = len([x for x in os.listdir(d) if x.endswith(".eml")]) + 1
+            with open(os.path.join(d, f"{n}.eml"), "wb") as f:
+                f.write(envelope.content)
         def deliver():
             im = imaplib.IMAP4("127.0.0.1", imap_port)
             im.login(user, password)

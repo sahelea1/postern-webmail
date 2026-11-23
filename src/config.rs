@@ -21,6 +21,8 @@ pub struct Config {
     /// When set, the server list is read from this file and the admin console
     /// cannot change it (for configuration managed elsewhere, e.g. a ConfigMap).
     pub servers_file: Option<PathBuf>,
+    /// Extra trust anchors for S/MIME signatures (PEM), next to the built-in Mozilla list.
+    pub smime_ca_file: Option<String>,
 }
 
 fn env(name: &str) -> Option<String> {
@@ -67,6 +69,7 @@ impl Config {
             max_upload_mb: num("POSTERN_MAX_UPLOAD_MB", 25)?.clamp(1, 200) as usize,
             brand: env("POSTERN_BRAND").unwrap_or_else(|| "Postern".into()),
             servers_file: env("POSTERN_SERVERS_FILE").map(PathBuf::from),
+            smime_ca_file: env("POSTERN_SMIME_CA_FILE"),
         })
     }
 

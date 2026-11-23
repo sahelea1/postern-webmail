@@ -7,7 +7,7 @@ English version: [README.md](README.md)
 
 ![Posteingang mit geöffnetem Newsletter; externe Bilder sind gesperrt, bis man sie anfordert](docs/screenshots/inbox-light.png)
 
-Version 0.1.2. Bitte den Abschnitt [Was getestet ist und was nicht](#was-getestet-ist-und-was-nicht) lesen, bevor du es produktiv einsetzt.
+Version 0.2.0. Bitte den Abschnitt [Was getestet ist und was nicht](#was-getestet-ist-und-was-nicht) lesen, bevor du es produktiv einsetzt.
 
 ## Was es kann
 
@@ -17,10 +17,13 @@ Version 0.1.2. Bitte den Abschnitt [Was getestet ist und was nicht](#was-geteste
 - Lesen: HTML-Mails in einem abgeschotteten Frame, externe Bilder erst auf Klick, Anhänge, Quelltext, Download als `.eml`
 - Schreiben: neue Nachricht, Antworten, Allen antworten, Weiterleiten (mit Anhängen), Cc/Bcc, Anhänge per Klick oder Drag-and-drop, Entwürfe
 - Verschieben, Archivieren, Spam, Papierkorb, endgültig löschen
-- Hell/Dunkel, kompakte Liste, Deutsch/Englisch, Tastenkürzel, Handy-Layout
+- **S/MIME:** signieren, verschlüsseln oder beides; Signaturen prüfen und eingehende Mails entschlüsseln; eigenen Schlüssel aus einer `.p12`/`.pfx`-Datei importieren; Zertifikate anderer werden aus geprüften Signaturen gesammelt oder von Hand importiert ([Details](#smime))
+- **Privatsphäre:** externe Bilder fragen, immer oder nie laden, mit Ausnahmeliste pro Absender; auf Wunsch Klartext statt HTML
+- **Benachrichtigungen:** Desktop-Benachrichtigung und Ton bei neuer Mail, Ungelesen-Zahl im Tab-Titel
+- Hell/Dunkel, acht Farbthemen, Spalten per Ziehen breiter oder schmaler, kompakte Liste, Deutsch/Englisch, Tastenkürzel, Handy-Layout
 - Admin-Konsole für Mailserver und erlaubte Domains, ohne Passwort (Einmal-Link von der Kommandozeile)
 
-Bewusst nicht enthalten in 0.1: HTML-Editor (es wird Klartext geschrieben), Konversationsansicht, Sieve-Filter, Adressbuch, PGP/S-MIME, Push (die Liste aktualisiert sich alle 60 Sekunden), OAuth-Anmeldung.
+Bewusst noch nicht enthalten: HTML-Editor (es wird Klartext geschrieben), Konversationsansicht, Sieve-Filter, Adressbuch, PGP, Push (die Liste aktualisiert sich alle 60 Sekunden), OAuth-Anmeldung.
 
 ## Sicherheitsmodell in Kürze
 
@@ -35,6 +38,31 @@ Bewusst nicht enthalten in 0.1: HTML-Editor (es wird Klartext geschrieben), Konv
 - **Admin-Konsole** läuft auf einem eigenen Port, ist nur über Loopback erreichbar und hat kein Passwort.
 
 Sicherheitslücken bitte wie in [SECURITY.md](SECURITY.md) beschrieben melden.
+
+## S/MIME
+
+Postern macht S/MIME auf dem Server, in Rust, ohne OpenSSL. Was es kann:
+
+| | |
+| --- | --- |
+| Signieren | RSA-Schlüssel (2048–4096 Bit, PKCS#1 v1.5 mit SHA-256) und EC-Schlüssel (P-256, P-384); als `multipart/signed` |
+| Verschlüsseln | AES-256-CBC, Schlüsseltransport RSA PKCS#1 v1.5, an alle An- und Cc-Empfänger und an dich selbst, damit die Kopie in „Gesendet“ lesbar bleibt; Entwürfe verschlüsselter Nachrichten werden verschlüsselt für dich abgelegt |
+| Prüfen | `multipart/signed` und eingebettete Signaturen, RSA PKCS#1 v1.5 und PSS, ECDSA P-256/P-384; auch BER, wie Outlook und Thunderbird es schreiben |
+| Entschlüsseln | AES-128/192/256-CBC und 3DES, RSA PKCS#1 v1.5 und RSA-OAEP |
+| Vertrauen | Die Zertifikatskette wird gegen Mozillas Wurzeln für E-Mail geprüft (83 Wurzeln, aus NSS), dazu alles aus `POSTERN_SMIME_CA_FILE`; oder du vertraust einem Zertifikat von Hand |
+
+Wo die Schlüssel liegen:
+
+- **Dein privater Schlüssel** wird einmal pro Browser aus deiner `.p12`/`.pfx`-Datei hochgeladen. Der Server prüft ihn, versiegelt ihn mit seinem eigenen Schlüssel (XChaCha20-Poly1305, an deine Adresse gebunden) und gibt ihn zurück. Der Browser hebt das Siegel auf und schickt es nur bei den Anfragen mit, die es brauchen: eine Nachricht öffnen, senden, Schlüsselprüfung. Weder die Datei noch ihr Passwort werden gespeichert. Wie beim Sitzungs-Cookie gilt: Wer `secret.key` *und* das Siegel hat, hat deinen Schlüssel. Ändert sich der Server-Schlüssel, einfach neu importieren.
+- **Zertifikate anderer** sind öffentlich und liegen im Browser. Sie kommen von selbst dazu, wenn eine Nachricht eine gültige Signatur mit einem Zertifikat trägt, das zu einer vertrauenswürdigen Wurzel führt und den Absender nennt; alles andere kannst du von Hand hinzufügen (PEM, DER oder `.p7c`). „Alle exportieren“ schreibt sie als eine PEM-Datei für ein anderes Gerät.
+- **Entschlüsselte Inhalte** gibt es nur im Arbeitsspeicher, im selben Zwei-Minuten-Cache wie jede geöffnete Nachricht.
+
+Schutzmaßnahmen:
+
+- Entpackt wird nur die oberste Ebene einer Nachricht, nie ein verschlüsselter Teil irgendwo in einem anderen Multipart (Schutz gegen EFAIL). Entschlüsselte Mails laden externe Bilder nie von selbst, egal was in der Bild-Einstellung steht.
+- Schlägt das Entpacken des RSA-Schlüssels fehl, geht es mit einem Zufallsschlüssel weiter, damit eine beschädigte und eine gefälschte Nachricht gleich enden (RFC 3218). Signiert wird mit `ring`, das konstant-zeitig arbeitet. Entschlüsselt wird mit der Bibliothek `rsa`, deren PKCS#1-v1.5-Code bekanntermaßen noch Zeitunterschiede zeigt ([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)); ein Angreifer müsste deinen Server viele ausgesuchte Nachrichten entschlüsseln lassen und die Zeit messen, und das löst nur du aus, eine Nachricht nach der anderen.
+
+Noch nicht unterstützt: Entschlüsseln mit und Verschlüsseln an EC-Schlüssel, AES-GCM (`AuthEnvelopedData`), Sperrprüfung (CRL, OCSP), Bcc zusammen mit Verschlüsselung (wird abgelehnt, weil die Verschlüsselung die Bcc-Empfänger allen verraten würde).
 
 ## Schnellstart mit Docker Compose hinter Traefik
 
@@ -87,8 +115,8 @@ Das Chart liegt in `deploy/helm/postern`. Es bringt Deployment, Service, Ingress
 
 ```sh
 # 1. Image bauen und in eine Registry schieben, die der Cluster erreicht
-docker build -t registry.example.com/postern:0.1.2 .
-docker push registry.example.com/postern:0.1.2
+docker build -t registry.example.com/postern:0.2.0 .
+docker push registry.example.com/postern:0.2.0
 
 # 2. Werte anpassen (Host, Mailserver) und installieren
 helm install webmail deploy/helm/postern -n mail --create-namespace \
@@ -133,6 +161,7 @@ Weitere Punkte:
 | `POSTERN_MAX_UPLOAD_MB` | `25` | Anhänge pro Nachricht insgesamt |
 | `POSTERN_BRAND` | `Postern` | Name in der Oberfläche |
 | `POSTERN_CA_FILE` | leer | Zusätzliche Zertifizierungsstellen (PEM) für interne Mailserver |
+| `POSTERN_SMIME_CA_FILE` | leer | Zusätzliche Wurzeln (PEM) für S/MIME-Signaturen, neben Mozillas eingebauter Liste. Für eine Firmen-CA |
 | `POSTERN_LOG` | `info` | `error`, `warn`, `info`, `debug` |
 | `POSTERN_INSECURE_HTTP` | `0` | Nur für lokale Entwicklung: Cookies ohne `Secure` |
 
@@ -168,6 +197,7 @@ src/
   state.rs          Sitzung, Anmelde-Limit, kurzlebiger Nachrichten-Cache (2 Minuten, nur im Speicher)
   api.rs            JSON-API, Schutz gegen Cross-Site-Anfragen, Sicherheits-Header
   message.rs        Mails parsen, HTML bereinigen, Nachrichten bauen
+  smime/            S/MIME: CMS lesen und schreiben, Kettenprüfung, roots.pem (Mozilla)
   backend/imap.rs   IMAP + SMTP
   backend/jmap.rs   JMAP
   admin.rs          Admin-Konsole
@@ -178,7 +208,7 @@ deploy/helm/        Helm-Chart
 tests/              End-to-End- und Browser-Tests samt Testservern
 ```
 
-Rund 5.200 Zeilen Rust (inklusive Unit-Tests) und 2.200 Zeilen TypeScript. In den eigenen Crates ist `unsafe` verboten. Die Oberfläche hat zwei Laufzeit-Abhängigkeiten (Preact, Signals), der Build acht npm-Pakete insgesamt.
+Rund 7.500 Zeilen Rust (inklusive Unit-Tests; 1.900 davon S/MIME) und 3.600 Zeilen TypeScript. In den eigenen Crates ist `unsafe` verboten. Die Oberfläche hat zwei Laufzeit-Abhängigkeiten (Preact, Signals), der Build acht npm-Pakete insgesamt.
 
 ## Selbst bauen und testen
 
@@ -194,6 +224,7 @@ Die End-to-End-Tests starten echte Testserver und steuern das Gateway über HTTP
 pip install -r tests/requirements.txt
 tests/e2e.sh imap    # pymap (IMAP) und ein SMTP-Server mit Anmeldung
 tests/e2e.sh jmap    # tests/jmap_mock.py
+tests/smime.sh       # S/MIME gegen OpenSSL, in beide Richtungen
 ```
 
 Die Browser-Tests (`tests/browser*.py`) brauchen Playwright mit Chrome und ein laufendes Gateway; der Aufruf steht jeweils in den ersten Zeilen der Datei.
@@ -204,9 +235,10 @@ Läuft bei jedem Push in der [CI](.github/workflows/ci.yml):
 
 | Bereich | Wie | Ergebnis |
 | --- | --- | --- |
-| Rust-Unit-Tests | `cargo test`: Cookie-Verschlüsselung, Konfiguration, HTML-Bereinigung, Nachrichtenbau, Eingabeprüfung | 37 von 37 |
+| Rust-Unit-Tests | `cargo test`: Cookie-Verschlüsselung, Konfiguration, HTML-Bereinigung, Nachrichtenbau, Eingabeprüfung, ASN.1 | 44 von 44 |
 | API über IMAP + SMTP | `tests/e2e.py` gegen einen echten IMAP-Server (pymap) und einen SMTP-Server mit Anmeldung | 107 von 107 |
 | API über JMAP | `tests/e2e.py` gegen `tests/jmap_mock.py` | 102 von 102 |
+| S/MIME | `tests/smime.sh`: Nachrichten von `openssl cms` (multipart/signed, eingebettet, BER, LF und CRLF, AES, 3DES, OAEP, erst signiert dann verschlüsselt, ECDSA, manipuliert, unbekannter Unterzeichner, falscher Absender) liest Postern; Nachrichten von Postern prüft `openssl cms -verify` und `-decrypt`; Entwürfe, Weiterleiten, Fehlerfälle | 67 von 67 |
 | Container-Image | `docker build`, danach Start mit schreibgeschütztem Dateisystem und ohne Capabilities, Abfrage von `/healthz` | besteht |
 | Helm-Chart | `helm lint` und `helm template` in mehreren Konfigurationen | besteht |
 
@@ -218,10 +250,12 @@ Von Hand während der Entwicklung, nicht in der CI:
 | Oberfläche | `tests/browser.py` in Chrome: anmelden, lesen, schreiben, senden, suchen, verschieben, Ordner, Einstellungen, Handy-Ansicht; jeder Konsolenfehler (auch CSP/Trusted Types) lässt den Test scheitern | bestanden |
 | Feindliche Mail | `tests/browser_hostile.py`: über 50 Tracking- und Skript-Tricks in einer Mail, in Chrome geöffnet | kein Skript, keine einzige Anfrage an fremde Hosts, nach Freigabe nur Bilder |
 | Admin-Konsole | `tests/browser_admin.py` und API-Checks | bestanden |
+| Neu in 0.2 | `tests/browser_features.py`: Spalten ziehen (Maus und Tasten, bleibt nach Neuladen), Farbthemen, Bild-Einstellungen, Benachrichtigung und Ton bei Tab im Hintergrund, Schlüssel und Zertifikat importieren, signiert und verschlüsselt senden und wieder lesen, Zertifikat vertrauen, Listenabfragen tragen nie den Schlüssel, Abmelden unter einer Sekunde mit erhaltenen lokalen Einstellungen | bestanden |
 
 Nicht getestet, bitte selbst prüfen:
 
 - **Echte Mailserver.** Der IMAP-Weg lief gegen pymap, nicht gegen Stalwart, Dovecot oder Gmail. Der JMAP-Weg ist nur gegen einen selbst geschriebenen Testserver nach RFC 8620/8621 geprüft.
+- **S/MIME mit echten Mailprogrammen.** Geprüft ist die Zusammenarbeit mit OpenSSL, mit dem Thunderbird und Outlook bei diesen Formaten übereinstimmen, aber nicht mit Outlook, Apple Mail oder Thunderbird selbst und nicht mit Zertifikaten einer öffentlichen CA.
 - **Echtes Traefik und ein echter Cluster.** Labels und Chart sind nach Dokumentation geschrieben; das Chart wird geprüft und gerendert, aber nicht installiert.
 - **Last und große Postfächer.** Die Liste lädt alle UIDs eines Ordners und zeigt 50 pro Seite. Bei sehr großen Ordnern ist das nicht gemessen.
 - **Eine unabhängige Sicherheitsprüfung.** Die gibt es nicht. Der Code ist mit KI-Unterstützung entstanden, und die Tests oben sind die des Projekts selbst.
@@ -232,7 +266,8 @@ Empfehlung: erst neben dem bisherigen Webmail auf eigenem Hostnamen betreiben, m
 
 - Abmelden macht das Cookie auf diesem Server sofort ungültig (Liste im Speicher). Nach einem Neustart ist die Liste leer; ein vorher gestohlenes Cookie gälte dann bis zu seinem Ablauf. Passwort ändern beendet alles.
 - Ohne IMAP-Erweiterung `SORT` ist die Liste nach Eingang (UID) sortiert, nicht nach Datum im Header.
-- Name und Signatur liegen im Browser (`localStorage`), nicht auf dem Server.
+- Einstellungen, dein versiegelter S/MIME-Schlüssel und gespeicherte Zertifikate liegen im Browser (`localStorage`), nicht auf dem Server; jedes Gerät hat also seine eigenen.
+- Benachrichtigungen brauchen einen offenen Tab; Push gibt es noch nicht. Manche Handy-Browser zeigen von Webseiten gar keine Benachrichtigungen.
 - Mehrere Replikas: Anmelde-Limit und Abmelde-Liste gelten pro Prozess.
 
 ## Fremde Bestandteile

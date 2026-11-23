@@ -3,7 +3,7 @@
 
 import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { toasts } from "./state";
+import { resizePane, persistLayout, resetLayout, toasts } from "./state";
 
 const PATHS: Record<string, string[]> = {
   inbox: ["M22 12h-6l-2 3h-4l-2-3H2", "M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"],
@@ -38,6 +38,21 @@ const PATHS: Record<string, string[]> = {
   code: ["M16 18l6-6-6-6", "M8 6l-6 6 6 6"],
   chevron: ["M6 9l6 6 6-6"],
   expand: ["M15 3h6v6", "M9 21H3v-6", "M21 3l-7 7", "M3 21l7-7"],
+  lock: ["M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z", "M7 11V7a5 5 0 0 1 10 0v4"],
+  unlock: ["M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z", "M7 11V7a5 5 0 0 1 9.9-1"],
+  seal: ["M12 15a7 7 0 1 0 0-14 7 7 0 0 0 0 14z", "M8.21 13.89 7 23l5-3 5 3-1.21-9.12"],
+  key: ["M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4"],
+  bell: ["M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9", "M13.73 21a2 2 0 0 1-3.46 0"],
+  volume: ["M11 5 6 9H2v6h4l5 4V5z", "M19.07 4.93a10 10 0 0 1 0 14.14", "M15.54 8.46a5 5 0 0 1 0 7.07"],
+  eye: ["M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"],
+  eyeOff: ["M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94", "M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19", "M14.12 14.12a3 3 0 1 1-4.24-4.24", "M1 1l22 22"],
+  upload: ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "M17 8l-5-5-5 5", "M12 3v12"],
+  check: ["M20 6 9 17l-5-5"],
+  checkCircle: ["M22 11.08V12a10 10 0 1 1-5.93-9.14", "M22 4 12 14.01l-3-3"],
+  alert: ["M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z", "M12 9v4", "M12 17h.01"],
+  user: ["M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2", "M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"],
+  droplet: ["M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"],
+  keyboard: ["M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z", "M6 9h.01", "M10 9h.01", "M14 9h.01", "M18 9h.01", "M7 15h10"],
 };
 
 export function Icon({ name, size = 18, fill = false }: { name: string; size?: number; fill?: boolean }) {
@@ -188,4 +203,64 @@ export function Toasts() {
 
 export function Spinner() {
   return <span class="spinner" role="progressbar" aria-label="Loading" />;
+}
+
+/** A drag handle on the right edge of a column. Arrow keys work too; a double click resets. */
+export function Resizer({ which, label }: { which: "rail" | "list"; label: string }) {
+  const width = () => (document.querySelector(`.${which}`) as HTMLElement | null)?.getBoundingClientRect().width ?? 0;
+  return (
+    <div
+      class="resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={label}
+      title={label}
+      tabIndex={0}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        const handle = e.currentTarget as HTMLElement;
+        const startX = e.clientX;
+        const startW = width();
+        handle.setPointerCapture(e.pointerId);
+        document.body.classList.add("resizing");
+        const move = (ev: PointerEvent) => resizePane(which, startW + ev.clientX - startX, false);
+        const up = () => {
+          handle.removeEventListener("pointermove", move);
+          handle.removeEventListener("pointerup", up);
+          handle.removeEventListener("pointercancel", up);
+          document.body.classList.remove("resizing");
+          persistLayout();
+        };
+        handle.addEventListener("pointermove", move);
+        handle.addEventListener("pointerup", up);
+        handle.addEventListener("pointercancel", up);
+        e.preventDefault();
+      }}
+      onDblClick={() => resetLayout(which)}
+      onKeyDown={(e) => {
+        const step = e.shiftKey ? 48 : 16;
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+          e.preventDefault();
+          resizePane(which, width() + (e.key === "ArrowLeft" ? -step : step), true);
+        } else if (e.key === "Home") {
+          e.preventDefault();
+          resetLayout(which);
+        }
+      }}
+    />
+  );
+}
+
+/** A labelled on/off switch built on a real checkbox. */
+export function Switch(p: { label: string; hint?: string; checked: boolean; disabled?: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <label class={`switch ${p.disabled ? "disabled" : ""}`}>
+      <span class="switch-text">
+        <span>{p.label}</span>
+        {p.hint && <small>{p.hint}</small>}
+      </span>
+      <input type="checkbox" role="switch" checked={p.checked} disabled={p.disabled} onChange={(e) => p.onChange((e.target as HTMLInputElement).checked)} />
+      <span class="switch-track" aria-hidden="true" />
+    </label>
+  );
 }

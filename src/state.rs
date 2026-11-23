@@ -7,6 +7,7 @@ use crate::{
     config::{Config, Protocol, ServerCfg, Servers, UsernameStyle},
     error::{Error, Result},
     seal::{self, Sealer},
+    smime::Trust,
 };
 use axum::{
     extract::{ConnectInfo, FromRequestParts},
@@ -44,6 +45,8 @@ pub struct Inner {
     pub jmap_sessions: jmap::Sessions,
     pub http: jmap::HttpClients,
     pub raw_cache: RawCache,
+    /// Trust anchors for S/MIME signatures.
+    pub trust: Trust,
     /// Sessions that signed out before their cookie expired: session id -> expiry.
     /// Kept in memory only, so a restart forgets it; the cookie's own expiry still applies.
     pub revoked: Mutex<HashMap<String, u64>>,
@@ -61,7 +64,7 @@ impl std::ops::Deref for AppState {
 }
 
 impl AppState {
-    pub fn new(cfg: Config, servers: Servers, sealer: Sealer) -> Self {
+    pub fn new(cfg: Config, servers: Servers, sealer: Sealer, trust: Trust) -> Self {
         AppState(Arc::new(Inner {
             cfg,
             servers: RwLock::new(Arc::new(servers)),
@@ -71,6 +74,7 @@ impl AppState {
             jmap_sessions: jmap::Sessions::default(),
             http: jmap::HttpClients::new(),
             raw_cache: RawCache::default(),
+            trust,
             revoked: Mutex::new(HashMap::new()),
             started: Instant::now(),
         }))
@@ -282,12 +286,16 @@ pub struct RawCache {
 }
 
 impl RawCache {
+    /// Reading an entry keeps it for another two minutes.
     pub fn get(&self, key: &str) -> Option<Bytes> {
-        let items = self.items.lock().unwrap();
+        let mut items = self.items.lock().unwrap();
         items
-            .iter()
+            .iter_mut()
             .find(|(k, _, t)| k == key && t.elapsed() < RAW_TTL)
-            .map(|(_, b, _)| b.clone())
+            .map(|(_, b, t)| {
+                *t = Instant::now();
+                b.clone()
+            })
     }
     pub fn put(&self, key: String, data: Bytes) {
         if data.len() > RAW_MAX_ITEM {

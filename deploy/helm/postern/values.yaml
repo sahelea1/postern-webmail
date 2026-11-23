@@ -1,7 +1,7 @@
 # ---- image -----------------------------------------------------------------
 # Build the image from this repository and push it to a registry
 # your cluster can pull from:
-#   docker build -t registry.example.com/postern:0.1.2 . && docker push registry.example.com/postern:0.1.2
+#   docker build -t registry.example.com/postern:0.2.0 . && docker push registry.example.com/postern:0.2.0
 image:
   repository: registry.example.com/postern
   tag: ""               # defaults to the chart's appVersion

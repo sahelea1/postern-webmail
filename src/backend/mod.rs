@@ -45,6 +45,8 @@ pub struct Summary {
     pub draft: bool,
     pub attachment: bool,
     pub preview: String,
+    /// "signed" or "encrypted" for S/MIME messages.
+    pub security: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Serialize, Default)]

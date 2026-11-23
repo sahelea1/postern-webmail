@@ -8,8 +8,10 @@ use crate::{
     error::{Error, Result},
     message::{self, Attachment, Compose},
     seal,
+    smime::{self, Cert, OwnKey, Security},
     state::{AppState, Auth, ClientIp, SESSION_CONTEXT, SessionData, session_key},
 };
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use axum::{
     Json, Router,
     body::Body,
@@ -45,6 +47,9 @@ pub fn router(st: AppState) -> Router {
         .route("/api/flags", post(flags))
         .route("/api/move", post(move_messages))
         .route("/api/delete", post(delete_messages))
+        .route("/api/smime/import", post(smime_import))
+        .route("/api/smime/certs", post(smime_certs))
+        .route("/api/smime/status", get(smime_status))
         .route(
             "/api/send",
             post(send).layer(DefaultBodyLimit::max(upload_limit)),
@@ -162,14 +167,14 @@ async fn logout(State(st): State<AppState>, auth: Result<Auth>) -> Response {
         st.jmap_sessions.forget(&a.key);
         st.raw_cache.drop_prefix(&format!("{}|", a.key));
     }
+    // No Clear-Site-Data here: browsers hold the response until their cache
+    // is cleared, which took many seconds, and "storage" also wiped the
+    // settings and S/MIME keys kept in this browser. API responses are
+    // never cached (no-store), so there is nothing to clear.
     let mut resp = Json(json!({ "ok": true })).into_response();
     if let Ok(v) = HeaderValue::from_str(&st.session_cookie("", 0)) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
-    resp.headers_mut().insert(
-        "clear-site-data",
-        HeaderValue::from_static("\"cache\", \"storage\""),
-    );
     resp
 }
 
@@ -277,6 +282,103 @@ async fn raw_of(st: &AppState, auth: &Auth, mailbox: &str, id: &str) -> Result<B
     Ok(raw)
 }
 
+/// The browser sends the user's sealed S/MIME key in this header with the
+/// requests that need it. Only this server can open it.
+const KEY_HEADER: &str = "x-postern-key";
+
+/// `Ok(None)`: no key sent. `Err`: a key was sent that this server cannot
+/// open (the server key changed, or it belongs to another address).
+fn own_key(st: &AppState, auth: &Auth, headers: &HeaderMap) -> std::result::Result<Option<OwnKey>, ()> {
+    match headers
+        .get(KEY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+    {
+        None => Ok(None),
+        Some(v) => smime::open_key(&st.sealer, v, &auth.data.email)
+            .map(Some)
+            .ok_or(()),
+    }
+}
+
+fn from_addresses(raw: &[u8]) -> Vec<String> {
+    message::parse(raw)
+        .map(|m| {
+            message::addrs(m.from())
+                .into_iter()
+                .map(|a| a.email.to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A message and, for S/MIME, its verified or decrypted body.
+struct Opened {
+    raw: Bytes,
+    inner: Option<Bytes>,
+    security: Option<Security>,
+    encrypted: bool,
+}
+
+impl Opened {
+    fn body(&self) -> &[u8] {
+        self.inner.as_deref().unwrap_or(&self.raw)
+    }
+}
+
+/// Fetches a message and unwraps its S/MIME layers. The unwrapped body goes
+/// into the same two-minute memory cache as the message, so the mail frame
+/// and its images can load without sending the key again. With `report`
+/// the signature is always checked anew.
+async fn open_message(
+    st: &AppState,
+    auth: &Auth,
+    mailbox: &str,
+    id: &str,
+    key: Option<OwnKey>,
+    report: bool,
+) -> Result<Opened> {
+    let raw = raw_of(st, auth, mailbox, id).await?;
+    let Some(kind) = smime::kind_of(&raw) else {
+        return Ok(Opened {
+            raw,
+            inner: None,
+            security: None,
+            encrypted: false,
+        });
+    };
+    let encrypted = kind == "encrypted";
+    let cache_key = format!("{}|{}|{}|inner", auth.key, mailbox, id);
+    if !report {
+        if let Some(inner) = st.raw_cache.get(&cache_key) {
+            return Ok(Opened {
+                raw,
+                inner: Some(inner),
+                security: None,
+                encrypted,
+            });
+        }
+    }
+    let st2 = st.clone();
+    let raw2 = raw.clone();
+    let un = tokio::task::spawn_blocking(move || {
+        let from = from_addresses(&raw2);
+        smime::unwrap(&raw2, &from, key.as_ref(), &st2.trust)
+    })
+    .await
+    .map_err(|e| Error::Internal(e.to_string()))?;
+    let inner = un.inner.map(Bytes::from);
+    if let Some(i) = &inner {
+        st.raw_cache.put(cache_key, i.clone());
+    }
+    Ok(Opened {
+        raw,
+        inner,
+        security: Some(un.security),
+        encrypted,
+    })
+}
+
 fn cid_prefix(mailbox: &str, id: &str) -> String {
     format!(
         "/api/message/cid?mailbox={}&id={}&cid=",
@@ -288,13 +390,25 @@ fn cid_prefix(mailbox: &str, id: &str) -> String {
 async fn message_view(
     State(st): State<AppState>,
     auth: Auth,
+    headers: HeaderMap,
     Query(r): Query<MsgRef>,
 ) -> Result<Json<Value>> {
-    let raw = raw_of(&st, &auth, &r.mailbox, &r.id).await?;
-    let view = message::view(&raw)?;
+    let key = own_key(&st, &auth, &headers);
+    let key_invalid = key.is_err();
+    let o = open_message(&st, &auth, &r.mailbox, &r.id, key.ok().flatten(), true).await?;
+    let mut view = message::view(&o.raw, o.inner.as_deref())?;
+    if o.encrypted && o.inner.is_none() {
+        // Nothing to show but the notice; the ciphertext is not an attachment.
+        view.text.clear();
+        view.attachments.clear();
+        view.has_html = false;
+        view.remote_images = false;
+    }
     let mut v = json!(view);
-    v["size"] = json!(raw.len());
+    v["size"] = json!(o.raw.len());
     v["can_load_images"] = json!(auth.server.remote_images == RemoteImages::Ask);
+    v["security"] = json!(o.security.unwrap_or_default());
+    v["key_invalid"] = json!(key_invalid);
     Ok(Json(v))
 }
 
@@ -327,11 +441,16 @@ struct HtmlQuery {
 async fn message_html(
     State(st): State<AppState>,
     auth: Auth,
+    headers: HeaderMap,
     Query(q): Query<HtmlQuery>,
 ) -> Result<Response> {
-    let raw = raw_of(&st, &auth, &q.mailbox, &q.id).await?;
+    let key = own_key(&st, &auth, &headers).ok().flatten();
+    let o = open_message(&st, &auth, &q.mailbox, &q.id, key, false).await?;
+    if o.encrypted && o.inner.is_none() {
+        return Err(Error::NotFound);
+    }
     let remote = q.images == 1 && auth.server.remote_images == RemoteImages::Ask;
-    let doc = message::html_view(&raw, remote, &cid_prefix(&q.mailbox, &q.id))?;
+    let doc = message::html_view(o.body(), remote, &cid_prefix(&q.mailbox, &q.id))?;
     let csp = format!(
         "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:{}; font-src 'none'; \
          form-action 'none'; base-uri 'none'; frame-ancestors 'self'; \
@@ -403,10 +522,15 @@ struct PartQuery {
 async fn message_part(
     State(st): State<AppState>,
     auth: Auth,
+    headers: HeaderMap,
     Query(q): Query<PartQuery>,
 ) -> Result<Response> {
-    let raw = raw_of(&st, &auth, &q.mailbox, &q.id).await?;
-    let part = message::part(&raw, q.part)?;
+    let key = own_key(&st, &auth, &headers).ok().flatten();
+    let o = open_message(&st, &auth, &q.mailbox, &q.id, key, false).await?;
+    if o.encrypted && o.inner.is_none() {
+        return Err(Error::NotFound);
+    }
+    let part = message::part(o.body(), q.part)?;
     // Only raster images may be shown in place; everything else is a download.
     let inline_type = if q.inline == 1 {
         message::sniff_image(&part.data)
@@ -441,10 +565,15 @@ struct CidQuery {
 async fn message_cid(
     State(st): State<AppState>,
     auth: Auth,
+    headers: HeaderMap,
     Query(q): Query<CidQuery>,
 ) -> Result<Response> {
-    let raw = raw_of(&st, &auth, &q.mailbox, &q.id).await?;
-    let part = message::cid_image(&raw, &q.cid)?;
+    let key = own_key(&st, &auth, &headers).ok().flatten();
+    let o = open_message(&st, &auth, &q.mailbox, &q.id, key, false).await?;
+    if o.encrypted && o.inner.is_none() {
+        return Err(Error::NotFound);
+    }
+    let part = message::cid_image(o.body(), &q.cid)?;
     let mut resp = Response::new(Body::from(part.data));
     untrusted_headers(&mut resp);
     resp.headers_mut().insert(
@@ -568,6 +697,17 @@ struct ForwardRef {
     parts: Vec<u32>,
 }
 
+#[derive(Deserialize, Default)]
+struct SmimeOpts {
+    #[serde(default)]
+    sign: bool,
+    #[serde(default)]
+    encrypt: bool,
+    /// Recipient certificates from the browser's store, base64 DER.
+    #[serde(default)]
+    certs: Vec<String>,
+}
+
 #[derive(Deserialize)]
 struct SendMeta {
     from_name: Option<String>,
@@ -595,9 +735,66 @@ struct SendMeta {
     answered: Option<MsgRef>,
     /// Attachments carried over from another message.
     forward: Option<ForwardRef>,
+    #[serde(default)]
+    smime: SmimeOpts,
 }
 
-async fn send(State(st): State<AppState>, auth: Auth, mut form: Multipart) -> Result<Json<Value>> {
+/// The certificates to encrypt for: the sender's own (for the Sent copy)
+/// and the best usable one for every To and Cc address.
+fn recipient_certs(certs: &[String], c: &Compose, own: &OwnKey) -> Result<Vec<Cert>> {
+    let parsed: Vec<Cert> = certs
+        .iter()
+        .take(200)
+        .filter_map(|b| B64.decode(b.trim()).ok())
+        .filter_map(|d| Cert::parse(&d).ok())
+        .collect();
+    let mut out = vec![own.cert.clone()];
+    let mut missing = Vec::new();
+    for a in c.to.iter().chain(&c.cc) {
+        let e = a.email.to_ascii_lowercase();
+        let best = parsed
+            .iter()
+            .filter(|x| x.emails.contains(&e) && x.can_encrypt())
+            .max_by_key(|x| x.not_after());
+        match best {
+            Some(x) => {
+                if !out.iter().any(|o| o.der == x.der) {
+                    out.push(x.clone());
+                }
+            }
+            None => missing.push(a.email.clone()),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(Error::bad(format!(
+            "No usable certificate for {}. Remove these recipients or send without encryption.",
+            missing.join(", ")
+        )));
+    }
+    Ok(out)
+}
+
+/// Signs and/or encrypts a built message. Returns the copy (with Bcc) and
+/// the message as sent (without Bcc); both carry the same protected body.
+fn protect(copy: &[u8], key: &OwnKey, sign: bool, recipients: Option<&[Cert]>) -> Result<(Vec<u8>, Vec<u8>)> {
+    let (outer, mut entity) = smime::split_message(copy);
+    if sign {
+        entity = smime::signed_entity(key, &entity)?;
+    }
+    if let Some(r) = recipients {
+        let refs: Vec<&Cert> = r.iter().collect();
+        entity = smime::enveloped_entity(&entity, &refs)?;
+    }
+    let wire = [smime::without_field(&outer, "bcc"), entity.clone()].concat();
+    Ok(([outer, entity].concat(), wire))
+}
+
+async fn send(
+    State(st): State<AppState>,
+    auth: Auth,
+    headers: HeaderMap,
+    mut form: Multipart,
+) -> Result<Json<Value>> {
     let mut meta: Option<SendMeta> = None;
     let mut attachments: Vec<Attachment> = Vec::new();
     let budget = st.cfg.max_upload_mb * 1024 * 1024;
@@ -638,10 +835,23 @@ async fn send(State(st): State<AppState>, auth: Auth, mut form: Multipart) -> Re
     if meta.text.len() > 2 * 1024 * 1024 {
         return Err(Error::bad("the message text is too long"));
     }
+    let wants_key = meta.smime.sign || meta.smime.encrypt;
+    let key = match own_key(&st, &auth, &headers) {
+        Ok(k) => k,
+        Err(()) if wants_key => {
+            return Err(Error::bad(
+                "Your S/MIME key on this device can no longer be used. Import it again in Settings.",
+            ));
+        }
+        Err(()) => None,
+    };
+    if wants_key && key.is_none() {
+        return Err(Error::bad("Import your S/MIME key in Settings first."));
+    }
     if let Some(f) = &meta.forward {
-        let raw = raw_of(&st, &auth, &f.mailbox, &f.id).await?;
+        let o = open_message(&st, &auth, &f.mailbox, &f.id, key.clone(), false).await?;
         for p in f.parts.iter().take(50) {
-            let part = message::part(&raw, *p)?;
+            let part = message::part(o.body(), *p)?;
             used += part.data.len();
             if used > budget {
                 return Err(Error::bad(format!(
@@ -690,7 +900,12 @@ async fn send(State(st): State<AppState>, auth: Auth, mut form: Multipart) -> Re
             .drafts_mailbox
             .as_deref()
             .ok_or_else(|| Error::bad("this account has no drafts folder"))?;
-        let copy = message::build(&compose, &message_id, true)?;
+        let mut copy = message::build(&compose, &message_id, true)?;
+        if meta.smime.encrypt {
+            // A draft of an encrypted message is kept encrypted, for the sender only.
+            let k = key.as_ref().expect("checked above");
+            copy = protect(&copy, k, false, Some(&[k.cert.clone()]))?.0;
+        }
         backend
             .append(drafts, &copy, &[Flag::Draft, Flag::Seen])
             .await?;
@@ -698,15 +913,43 @@ async fn send(State(st): State<AppState>, auth: Auth, mut form: Multipart) -> Re
         if recipients.is_empty() {
             return Err(Error::bad("add at least one recipient"));
         }
+        let (wire, copy) = match &key {
+            Some(k) if wants_key => {
+                if meta.smime.encrypt && !compose.bcc.is_empty() {
+                    return Err(Error::bad(
+                        "Encrypted messages cannot have Bcc recipients: the encryption would name them to everyone. Send them a separate message.",
+                    ));
+                }
+                let certs = if meta.smime.encrypt {
+                    Some(recipient_certs(&meta.smime.certs, &compose, k)?)
+                } else {
+                    None
+                };
+                let built = message::build(&compose, &message_id, true)?;
+                let (copy, wire) = protect(&built, k, meta.smime.sign, certs.as_deref())?;
+                (wire, copy)
+            }
+            _ => (
+                message::build(&compose, &message_id, false)?,
+                message::build(&compose, &message_id, true)?,
+            ),
+        };
         let out = Outgoing {
             from: compose.from_email.clone(),
             recipients,
-            wire: message::build(&compose, &message_id, false)?,
-            copy: message::build(&compose, &message_id, true)?,
+            wire,
+            copy,
             sent_mailbox: meta.sent_mailbox.clone(),
         };
         backend.send(&out).await?;
-        tracing::info!(server = %auth.server.id, recipients = out.recipients.len(), bytes = out.wire.len(), "message sent");
+        tracing::info!(
+            server = %auth.server.id,
+            recipients = out.recipients.len(),
+            bytes = out.wire.len(),
+            signed = meta.smime.sign,
+            encrypted = meta.smime.encrypt,
+            "message sent"
+        );
         if let Some(a) = &meta.answered {
             // Sending succeeded; a failed flag update is not worth an error.
             let _ = backend
@@ -719,6 +962,76 @@ async fn send(State(st): State<AppState>, auth: Auth, mut form: Multipart) -> Re
         forget_cached(&st, &auth, &d.mailbox);
     }
     Ok(Json(json!({ "ok": true, "draft": meta.draft })))
+}
+
+// ---- S/MIME ------------------------------------------------------------------
+
+/// Reads the user's .p12/.pfx file and returns the key sealed for this
+/// server and this address. Neither the file nor its password is kept.
+async fn smime_import(State(st): State<AppState>, auth: Auth, mut form: Multipart) -> Result<Json<Value>> {
+    let mut data: Option<Bytes> = None;
+    let mut password = String::new();
+    while let Some(field) = form.next_field().await? {
+        match field.name() {
+            Some("file") => data = Some(field.bytes().await?),
+            Some("password") => password = field.text().await?,
+            _ => {}
+        }
+    }
+    let data = data.ok_or_else(|| Error::bad("Choose a .p12 or .pfx file."))?;
+    if data.is_empty() || data.len() > 128 * 1024 {
+        return Err(Error::bad("This does not look like a key file."));
+    }
+    let st2 = st.clone();
+    let email = auth.data.email.clone();
+    let imp = tokio::task::spawn_blocking(move || {
+        smime::import(&st2.sealer, &st2.trust, &data, &password, &email)
+    })
+    .await
+    .map_err(|e| Error::Internal(e.to_string()))??;
+    tracing::info!(server = %auth.server.id, "S/MIME key imported");
+    Ok(Json(json!({
+        "sealed": imp.sealed,
+        "cert": imp.cert,
+        "email_match": imp.email_match,
+        "can_decrypt": imp.can_decrypt,
+    })))
+}
+
+#[derive(Deserialize)]
+struct CertsReq {
+    /// The file's bytes, base64: PEM, DER, or a .p7c/.p7b bundle.
+    data: String,
+}
+
+/// Reads certificates for the browser's store and says how far they are trusted.
+async fn smime_certs(State(st): State<AppState>, _auth: Auth, Json(r): Json<CertsReq>) -> Result<Json<Value>> {
+    let bytes = B64
+        .decode(r.data.trim())
+        .map_err(|_| Error::bad("The file could not be read."))?;
+    let certs = smime::certificates_from(&bytes);
+    if certs.is_empty() {
+        return Err(Error::bad("No certificate was found in this file."));
+    }
+    let ders: Vec<&[u8]> = certs.iter().map(|c| c.der.as_slice()).collect();
+    let infos: Vec<smime::CertInfo> = certs
+        .iter()
+        .map(|c| {
+            let others: Vec<&[u8]> = ders.iter().copied().filter(|d| *d != c.der.as_slice()).collect();
+            c.info(&st.trust, &others)
+        })
+        .collect();
+    Ok(Json(json!({ "certs": infos })))
+}
+
+/// Whether the key this browser holds can still be opened here.
+async fn smime_status(State(st): State<AppState>, auth: Auth, headers: HeaderMap) -> Json<Value> {
+    let key = match own_key(&st, &auth, &headers) {
+        Ok(Some(_)) => "ok",
+        Ok(None) => "none",
+        Err(()) => "invalid",
+    };
+    Json(json!({ "key": key, "anchors": st.trust.len() }))
 }
 
 /// Headers every response gets unless a handler already set its own.

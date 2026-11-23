@@ -12,7 +12,7 @@ name: postern
 services:
   postern:
     build: .
-    image: postern:0.1.2
+    image: postern:0.2.0
     restart: unless-stopped
     environment:
       # Take the visitor's address from Traefik's X-Forwarded-For header.
@@ -23,6 +23,8 @@ services:
       POSTERN_SESSION_HOURS: ${POSTERN_SESSION_HOURS:-168}
       POSTERN_MAX_UPLOAD_MB: ${POSTERN_MAX_UPLOAD_MB:-25}
       POSTERN_LOG: ${POSTERN_LOG:-info}
+      # Optional extra roots for S/MIME signatures (a file inside the container).
+      POSTERN_SMIME_CA_FILE: ${POSTERN_SMIME_CA_FILE:-}
     volumes:
       # Holds servers.toml and the cookie sealing key. No mail, no passwords.
       - postern-data:/data

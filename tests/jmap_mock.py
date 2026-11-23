@@ -52,6 +52,21 @@ def addresses(msg, header):
     return out or None
 
 
+def raw_header(raw, name):
+    """The raw value of the first header field `name`, as RFC 8621 asRaw gives it."""
+    head = raw.split(b"\r\n\r\n", 1)[0].split(b"\n\n", 1)[0].decode("utf-8", "replace")
+    value, found = [], False
+    for line in head.splitlines():
+        if found and line[:1] in (" ", "\t"):
+            value.append("\r\n" + line)
+        elif found:
+            break
+        elif ":" in line and line.split(":", 1)[0].strip().lower() == name:
+            found = True
+            value.append(line.split(":", 1)[1])
+    return "".join(value) if found else None
+
+
 def email_props(eid, props):
     e = emails[eid]
     msg = email.message_from_bytes(e["raw"], policy=email.policy.default)
@@ -63,6 +78,7 @@ def email_props(eid, props):
         "subject": str(msg["subject"]) if msg["subject"] is not None else None,
         "from": addresses(msg, "from"), "to": addresses(msg, "to"),
         "preview": " ".join(text.split())[:256], "hasAttachment": any(True for _ in msg.iter_attachments()),
+        "header:Content-Type:asRaw": raw_header(e["raw"], "content-type"),
     }
     if props is None:
         return full

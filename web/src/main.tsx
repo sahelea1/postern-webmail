@@ -124,9 +124,8 @@ function onKey(e: KeyboardEvent) {
 function Shell() {
   useEffect(() => {
     document.addEventListener("keydown", onKey);
-    const poll = setInterval(() => {
-      if (document.visibilityState === "visible") void S.refresh(true);
-    }, 60_000);
+    // Also in the background, so new mail can be announced.
+    const poll = setInterval(() => void S.refresh(true), 60_000);
     const seen = () => {
       if (document.visibilityState === "visible") void S.refresh(true);
     };
@@ -135,15 +134,30 @@ function Shell() {
       if (S.draft.value) e.preventDefault();
     };
     window.addEventListener("beforeunload", leaving);
+    // Keep dragged column widths inside the window when it shrinks.
+    const fit = () => {
+      const l = S.layout.value.list;
+      if (l) S.resizePane("list", l, false);
+    };
+    window.addEventListener("resize", fit);
     return () => {
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("visibilitychange", seen);
       window.removeEventListener("beforeunload", leaving);
+      window.removeEventListener("resize", fit);
       clearInterval(poll);
     };
   }, []);
+  const unread = S.inboxUnread.value;
+  useEffect(() => {
+    document.title = unread > 0 ? `(${unread}) ${S.brand.value}` : S.brand.value;
+  }, [unread, S.brand.value]);
+  const { rail, list } = S.layout.value;
   return (
-    <div class={`shell ${S.openId.value ? "reading" : ""}`}>
+    <div
+      class={`shell ${S.openId.value ? "reading" : ""}`}
+      style={{ "--rail-w": rail ? `${rail}px` : undefined, "--list-w": list ? `${list}px` : undefined }}
+    >
       <Rail />
       {S.railOpen.value && <div class="scrim" onClick={() => (S.railOpen.value = false)} />}
       <MessageList />

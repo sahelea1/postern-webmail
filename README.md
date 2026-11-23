@@ -16,7 +16,7 @@ Deutsche Fassung: [README.de.md](README.de.md)
 
 ## Status
 
-Version 0.1.2. Early, and honest about it: the test suite is broad, but the project has not been run against many real mail servers and has had no independent security review. Read [What is tested and what is not](#what-is-tested-and-what-is-not) before you put it in front of users.
+Version 0.2.0. Early, and honest about it: the test suite is broad, but the project has not been run against many real mail servers and has had no independent security review. Read [What is tested and what is not](#what-is-tested-and-what-is-not) before you put it in front of users.
 
 ## Features
 
@@ -26,10 +26,13 @@ Version 0.1.2. Early, and honest about it: the test suite is broad, but the proj
 - Reading: HTML mail in a locked-down frame, remote images only on request, attachments, message source, download as `.eml`
 - Writing: new message, reply, reply all, forward (with attachments), Cc/Bcc, attachments by click or drag and drop, drafts
 - Move, archive, spam, trash, delete for good
-- Light and dark theme, compact list, English and German, keyboard shortcuts, phone layout
+- **S/MIME:** sign, encrypt, or both; verify signatures and decrypt incoming mail; import your key from a `.p12`/`.pfx` file; certificates of other people are collected from verified signatures or imported by hand ([details](#smime))
+- **Privacy:** remote images ask, always or never, with a per-sender allow list; plain text instead of HTML if you prefer
+- **Notifications:** desktop notifications and a sound for new mail, unread count in the tab title
+- Light and dark mode, eight colour themes, columns you can drag wider or narrower, compact list, English and German, keyboard shortcuts, phone layout
 - Admin console for mail servers and allowed domains, with no password of its own (one-time link from the command line)
 
-Left out of 0.1 on purpose: HTML editor (you write plain text), conversation view, Sieve filters, address book, PGP/S-MIME, push (the list refreshes every 60 seconds), OAuth sign-in.
+Left out on purpose so far: HTML editor (you write plain text), conversation view, Sieve filters, address book, PGP, push (the list refreshes every 60 seconds), OAuth sign-in.
 
 ## Security model
 
@@ -44,6 +47,31 @@ Left out of 0.1 on purpose: HTML editor (you write plain text), conversation vie
 - **The admin console** listens on its own port, is meant for loopback only, and has no password. You get in with a single-use link printed by `postern admin-link`.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
+## S/MIME
+
+Postern does S/MIME on the server, in Rust, without OpenSSL. What it can do:
+
+| | |
+| --- | --- |
+| Sign | RSA (2048–4096 bit, PKCS#1 v1.5 with SHA-256) and EC (P-256, P-384) keys; clear-signed `multipart/signed` |
+| Encrypt | AES-256-CBC, key transport RSA PKCS#1 v1.5, to every To and Cc recipient plus yourself, so the Sent copy stays readable; drafts of encrypted messages are stored encrypted to you |
+| Verify | clear-signed and opaque signatures, RSA PKCS#1 v1.5 and PSS, ECDSA P-256/P-384; BER as Outlook and Thunderbird write it |
+| Decrypt | AES-128/192/256-CBC and 3DES, RSA PKCS#1 v1.5 and RSA-OAEP |
+| Trust | the certificate chain is checked against Mozilla's roots for e-mail (83 roots, from NSS), plus any file in `POSTERN_SMIME_CA_FILE`; or you trust a certificate by hand |
+
+Where the keys are:
+
+- **Your private key** is uploaded once per browser from your `.p12`/`.pfx` file. The server checks it, seals it with its own key (XChaCha20-Poly1305, bound to your address) and hands it back. The browser keeps the sealed blob and sends it in a header only with the requests that need it: opening a message, sending, and the key check. Neither the file nor its password is stored. As with the session cookie: whoever has `secret.key` *and* the sealed blob has your key. If the server key changes, import again.
+- **Certificates of other people** are public and live in the browser. They are added by themselves when a message carries a valid signature from a certificate that chains to a trusted root and names the sender; anything else you can add by hand (PEM, DER or `.p7c`). "Export all" writes them as one PEM file to take to another device.
+- **Decrypted content** exists only in memory, in the same two-minute cache as any opened message.
+
+Defences:
+
+- Only the top level of a message is unwrapped, never an encrypted part inside some other multipart (the EFAIL defence). Decrypted mail never loads remote images by itself, whatever the image setting says.
+- A failed RSA key unwrap continues with a random key, so a damaged and a forged message end the same way (RFC 3218). Signing uses `ring`, which is constant-time. Decryption uses the `rsa` crate, whose PKCS#1 v1.5 code is still known to leak timing ([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)); an attacker would have to make your server decrypt many chosen messages and time it, which only you can trigger, one message at a time.
+
+Not supported yet: decrypting with or encrypting to EC keys, AES-GCM (`AuthEnvelopedData`), revocation checks (CRL, OCSP), Bcc together with encryption (refused, because the encryption would name the Bcc recipients to everyone).
 
 ## Quick start: Docker Compose behind Traefik
 
@@ -96,8 +124,8 @@ The chart is in `deploy/helm/postern`. It brings a Deployment, Service, Ingress 
 
 ```sh
 # 1. Build the image and push it to a registry your cluster can reach
-docker build -t registry.example.com/postern:0.1.2 .
-docker push registry.example.com/postern:0.1.2
+docker build -t registry.example.com/postern:0.2.0 .
+docker push registry.example.com/postern:0.2.0
 
 # 2. Set your values (host, mail servers) and install
 helm install webmail deploy/helm/postern -n mail --create-namespace \
@@ -142,6 +170,7 @@ More to know:
 | `POSTERN_MAX_UPLOAD_MB` | `25` | Total attachment size per message |
 | `POSTERN_BRAND` | `Postern` | Name shown in the client |
 | `POSTERN_CA_FILE` | empty | Extra certificate authorities (PEM) for internal mail servers |
+| `POSTERN_SMIME_CA_FILE` | empty | Extra roots (PEM) for S/MIME signatures, next to the built-in Mozilla list. For a company CA |
 | `POSTERN_LOG` | `info` | `error`, `warn`, `info`, `debug` |
 | `POSTERN_INSECURE_HTTP` | `0` | Local development only: cookies without `Secure` |
 
@@ -177,6 +206,7 @@ src/
   state.rs          session, sign-in limit, short-lived message cache (2 minutes, memory only)
   api.rs            JSON API, cross-site request defence, security headers
   message.rs        parsing mail, sanitizing HTML, building messages
+  smime/            S/MIME: CMS reading and writing, chain checks, roots.pem (Mozilla)
   backend/imap.rs   IMAP + SMTP
   backend/jmap.rs   JMAP
   admin.rs          admin console
@@ -187,7 +217,7 @@ deploy/helm/        Helm chart
 tests/              end-to-end and browser tests with their test servers
 ```
 
-About 5,200 lines of Rust (unit tests included) and 2,200 lines of TypeScript. `unsafe` is forbidden in the project's own code. The client has two runtime dependencies (Preact, Signals); the build uses eight npm packages in total.
+About 7,500 lines of Rust (unit tests included; 1,900 of them S/MIME) and 3,600 lines of TypeScript. `unsafe` is forbidden in the project's own code. The client has two runtime dependencies (Preact, Signals); the build uses eight npm packages in total.
 
 ## Build and test
 
@@ -203,6 +233,7 @@ The end-to-end suite starts real test servers and drives the gateway over HTTP:
 pip install -r tests/requirements.txt
 tests/e2e.sh imap    # pymap (IMAP) and an SMTP server that requires sign-in
 tests/e2e.sh jmap    # tests/jmap_mock.py
+tests/smime.sh       # S/MIME against OpenSSL, in both directions
 ```
 
 The browser tests (`tests/browser*.py`) need Playwright with Chrome and a running gateway; each file's first lines say how to call it.
@@ -213,9 +244,10 @@ Run on every push by [CI](.github/workflows/ci.yml):
 
 | Area | How | Result |
 | --- | --- | --- |
-| Rust unit tests | `cargo test`: cookie encryption, configuration, HTML sanitizing, message building, input checks | 37 of 37 |
+| Rust unit tests | `cargo test`: cookie encryption, configuration, HTML sanitizing, message building, input checks, ASN.1 | 44 of 44 |
 | API over IMAP + SMTP | `tests/e2e.py` against a real IMAP server (pymap) and an SMTP server with sign-in | 107 of 107 |
 | API over JMAP | `tests/e2e.py` against `tests/jmap_mock.py` | 102 of 102 |
+| S/MIME | `tests/smime.sh`: messages made by `openssl cms` (clear-signed, opaque, BER, LF and CRLF, AES, 3DES, OAEP, sign-then-encrypt, ECDSA, tampered, unknown signer, wrong sender) read by Postern; messages from Postern checked by `openssl cms -verify` and `-decrypt`; drafts, forwarding, error cases | 67 of 67 |
 | Container image | `docker build`, then start it read-only without capabilities and ask it for `/healthz` | passes |
 | Helm chart | `helm lint` and `helm template` in several configurations | passes |
 
@@ -227,10 +259,12 @@ Run by hand during development, not in CI:
 | Web client | `tests/browser.py` in Chrome: sign in, read, write, send, search, move, folders, settings, phone view; any console error (CSP and Trusted Types included) fails the test | passed |
 | Hostile mail | `tests/browser_hostile.py`: more than 50 tracking and script tricks in one message, opened in Chrome | no script ran, no request left for a foreign host; after allowing images, only images |
 | Admin console | `tests/browser_admin.py` and API checks | passed |
+| New in 0.2 | `tests/browser_features.py`: dragging columns (mouse and keys, kept after reload), colour themes, image settings, notifications and sound with the tab in the background, importing a key and a certificate, sending signed and encrypted mail and reading it back, trusting a certificate, that lists never carry the key, sign-out in under a second with local settings kept | passed |
 
 Not tested. Please check these yourself:
 
 - **Real mail servers.** The IMAP path ran against pymap, not against Stalwart, Dovecot or Gmail. The JMAP path ran only against a test server written from RFC 8620/8621.
+- **S/MIME with real mail clients.** Interoperability is tested against OpenSSL, which Thunderbird and Outlook agree with on these formats, but not against Outlook, Apple Mail or Thunderbird themselves, and not with certificates from a public CA.
 - **A real Traefik and a real cluster.** The labels and the chart follow the documentation; the chart is linted and rendered, not installed.
 - **Load and large mailboxes.** The list loads all UIDs of a folder and shows 50 per page. Very large folders have not been measured.
 - **An independent security review.** There is none. The code was written with AI assistance and the tests above are the project's own.
@@ -241,7 +275,8 @@ Suggested path: run it next to your current webmail on its own host name, walk t
 
 - Signing out invalidates the cookie on this server at once (a list in memory). After a restart the list is empty, so a cookie stolen earlier would work until it expires. Changing the password ends everything.
 - Without the IMAP `SORT` extension the list is ordered by arrival (UID), not by the date header.
-- Name and signature are kept in the browser (`localStorage`), not on the server.
+- Settings, your sealed S/MIME key and saved certificates are kept in the browser (`localStorage`), not on the server, so each device has its own.
+- Notifications need the tab to be open; there is no push yet. Some mobile browsers do not show notifications from a page at all.
 - Several replicas: the sign-in limit and the sign-out list are per process.
 
 ## Third-party parts

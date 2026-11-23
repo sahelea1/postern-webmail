@@ -74,6 +74,10 @@ pub fn summarize(head_and_some_body: &[u8]) -> Summary {
             .body_preview(220)
             .map(|p| one_line(&p, 200))
             .unwrap_or_default();
+        s.security = crate::smime::kind_of(head_and_some_body);
+        if s.security == Some("encrypted") {
+            s.preview.clear();
+        }
         s.attachment = m
             .content_type()
             .map(|ct| {
@@ -144,14 +148,24 @@ fn clean_cid(cid: &str) -> &str {
     cid.trim().trim_start_matches('<').trim_end_matches('>')
 }
 
-pub fn view(raw: &[u8]) -> Result<MessageView> {
-    let m = parse(raw)?;
-    let html = html_of(&m);
+/// Builds the view of a message. The header fields come from `raw`; the
+/// body comes from `inner` when S/MIME unwrapping produced one.
+pub fn view(raw: &[u8], inner: Option<&[u8]>) -> Result<MessageView> {
+    let outer = parse(raw)?;
+    let body_msg;
+    let m = match inner {
+        Some(b) => {
+            body_msg = parse(b)?;
+            &body_msg
+        }
+        None => &outer,
+    };
+    let html = html_of(m);
     let remote_images = html.map(|h| sanitize_html(h, false, "").1).unwrap_or(false);
     let text = m.body_text(0).map(|t| t.into_owned()).unwrap_or_default();
 
     let mut references: Vec<String> = Vec::new();
-    for hv in [m.references(), m.in_reply_to()] {
+    for hv in [outer.references(), outer.in_reply_to()] {
         // `as_text` on a list yields a single entry, so the list comes first.
         match hv {
             mail_parser::HeaderValue::TextList(list) => {
@@ -193,14 +207,14 @@ pub fn view(raw: &[u8]) -> Result<MessageView> {
         .collect();
 
     Ok(MessageView {
-        subject: one_line(m.subject().unwrap_or(""), 500),
-        from: addrs(m.from()),
-        to: addrs(m.to()),
-        cc: addrs(m.cc()),
-        bcc: addrs(m.bcc()),
-        reply_to: addrs(m.reply_to()),
-        date: m.date().map(|d| d.to_rfc3339()),
-        message_id: m.message_id().map(|s| s.to_string()),
+        subject: one_line(outer.subject().unwrap_or(""), 500),
+        from: addrs(outer.from()),
+        to: addrs(outer.to()),
+        cc: addrs(outer.cc()),
+        bcc: addrs(outer.bcc()),
+        reply_to: addrs(outer.reply_to()),
+        date: outer.date().map(|d| d.to_rfc3339()),
+        message_id: outer.message_id().map(|s| s.to_string()),
         references,
         text,
         has_html: html.is_some(),
@@ -785,7 +799,7 @@ JVBERi0xLjQK\r\n\
 
     #[test]
     fn view_extracts_everything() {
-        let v = view(SAMPLE).unwrap();
+        let v = view(SAMPLE, None).unwrap();
         assert_eq!(v.subject, "Gr\u{fc}\u{df}e from Ann");
         assert_eq!(v.from[0].email, "ann@example.com");
         assert_eq!(v.from[0].name.as_deref(), Some("Ann Example"));
@@ -880,7 +894,7 @@ JVBERi0xLjQK\r\n\
         assert!(m.body_text(0).unwrap().contains("line two \u{fc}"));
         assert_eq!(m.attachments.len(), 1);
         assert_eq!(m.in_reply_to().as_text(), Some("m1@example.com"));
-        let v = view(&copy).unwrap();
+        let v = view(&copy, None).unwrap();
         assert_eq!(v.bcc[0].email, "secret@example.org");
     }
 

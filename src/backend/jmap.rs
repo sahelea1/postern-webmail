@@ -521,7 +521,7 @@ impl Backend for JmapBackend {
                     ["Email/get", {
                         "accountId": s.account_id,
                         "#ids": { "resultOf": "q", "name": "Email/query", "path": "/ids" },
-                        "properties": ["id", "subject", "from", "to", "receivedAt", "size", "keywords", "preview", "hasAttachment"]
+                        "properties": ["id", "subject", "from", "to", "receivedAt", "size", "keywords", "preview", "hasAttachment", "header:Content-Type:asRaw"]
                     }, "g"]
                 ]),
             )
@@ -575,13 +575,24 @@ impl Backend for JmapBackend {
                                     .and_then(Value::as_str)
                                     .unwrap_or("")
                                     .to_string(),
+                                security: e
+                                    .get("header:Content-Type:asRaw")
+                                    .and_then(Value::as_str)
+                                    .and_then(|ct| {
+                                        crate::smime::kind_of(format!("Content-Type:{ct}\r\n\r\n").as_bytes())
+                                    }),
                             },
                         ))
                     })
                     .collect()
             })
             .unwrap_or_default();
-        let items: Vec<Summary> = ids.iter().filter_map(|id| by_id.remove(id)).collect();
+        let mut items: Vec<Summary> = ids.iter().filter_map(|id| by_id.remove(id)).collect();
+        for i in &mut items {
+            if i.security == Some("encrypted") {
+                i.preview.clear();
+            }
+        }
         let total = q
             .get("total")
             .and_then(Value::as_u64)

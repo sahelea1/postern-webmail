@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { t } from "./i18n";
 import * as S from "./state";
-import { Avatar, Icon, IconButton, Menu, MenuItem, Spinner } from "./ui";
+import { Avatar, Icon, IconButton, Menu, MenuItem, Resizer, Spinner } from "./ui";
 
 const ROLE_ICON: Record<string, string> = { inbox: "inbox", drafts: "drafts", sent: "sent", archive: "archive", junk: "junk", trash: "trash" };
 
@@ -78,8 +78,9 @@ export function Rail() {
           <span class="who-mail">{me.email}</span>
         </div>
         <IconButton icon="settings" label={t("settings")} onClick={() => (S.dialog.value = { kind: "settings" })} />
-        <IconButton icon="logout" label={t("signOut")} onClick={() => void S.logout()} />
+        <IconButton icon="logout" label={t("signOut")} onClick={() => S.logout()} />
       </div>
+      <Resizer which="rail" label={t("resizeRail")} />
     </nav>
   );
 }
@@ -122,13 +123,25 @@ function Row({ m }: { m: S.Summary }) {
         <span class="row-top">
           <span class="row-from">{people}</span>
           <span class="row-marks">
+            {m.security === "encrypted" && (
+              <span title={t("encryptedMark")}>
+                <Icon name="lock" size={13} />
+              </span>
+            )}
+            {m.security === "signed" && (
+              <span title={t("signedMark")}>
+                <Icon name="seal" size={13} />
+              </span>
+            )}
             {m.answered && <Icon name="reply" size={13} />}
             {m.attachment && <Icon name="clip" size={13} />}
           </span>
           <time class="row-date">{S.fmtDateShort(m.date)}</time>
         </span>
         <span class="row-subject">{m.subject || t("noSubject")}</span>
-        <span class="row-preview">{m.preview}</span>
+        <span class={`row-preview ${m.security === "encrypted" && !m.preview ? "muted-preview" : ""}`}>
+          {m.security === "encrypted" && !m.preview ? t("encryptedPreview") : m.preview}
+        </span>
       </button>
       <button
         type="button"
@@ -243,6 +256,7 @@ export function MessageList() {
         )}
         <div ref={sentinel} class="sentinel" />
       </div>
+      <Resizer which="list" label={t("resizeList")} />
     </section>
   );
 }
@@ -337,6 +351,128 @@ function People({ label, list }: { label: string; list: S.Addr[] }) {
   );
 }
 
+function CertDetails({ c, sig }: { c: S.CertInfo; sig?: S.SignatureReport }) {
+  const stored = S.certStore.value.find((x) => x.fingerprint === c.fingerprint);
+  const fp = c.fingerprint.toUpperCase().match(/.{2}/g)!.join(":");
+  return (
+    <div class="sec-details">
+      <dl>
+        <dt>{t("from")}</dt>
+        <dd>
+          {c.name} {c.emails.length > 0 && <span class="muted">&lt;{c.emails.join(", ")}&gt;</span>}
+        </dd>
+        <dt>{t("details")}</dt>
+        <dd>
+          {t("issuedBy", c.issuer)} · {t("validUntil", S.fmtDateLong(c.not_after))} · {c.key}
+        </dd>
+        {sig?.signed_at && (
+          <>
+            <dt>{t("date")}</dt>
+            <dd>{t("signedAt", S.fmtDateLong(sig.signed_at))}</dd>
+          </>
+        )}
+        <dt>{t("fingerprint")}</dt>
+        <dd class="mono">{fp}</dd>
+      </dl>
+      {(sig?.trust_detail || c.trust_detail) && <p class="muted">{sig?.trust_detail || c.trust_detail}</p>}
+      {sig?.weak && <p class="warn-text">{t("sigWeak")}</p>}
+      <p class="muted small">{t("revocationNote")}</p>
+      <div class="sec-actions">
+        {stored?.pinned ? (
+          <button type="button" class="ghost small" onClick={() => S.setPinned(c.fingerprint, false)}>
+            {t("untrustThis")}
+          </button>
+        ) : (
+          c.trust !== "trusted" && (
+            <button
+              type="button"
+              class="ghost small"
+              onClick={() => {
+                S.addCerts([c], "manual");
+                S.toast(t("certSaved"));
+              }}
+            >
+              <Icon name="check" size={14} />
+              {t("trustThis")}
+            </button>
+          )
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** What S/MIME says about the open message: a line of chips, details on click. */
+function SecurityStrip({ v }: { v: S.MessageView }) {
+  const [open, setOpen] = useState(false);
+  const enc = v.security?.encrypted;
+  const sig = v.security?.signed;
+  if (!enc && !sig) return null;
+  let sigChip = null;
+  if (sig) {
+    const who = sig.signer ? sig.signer.emails[0] || sig.signer.name : "?";
+    let tone = "warn";
+    let text = t("sigUnchecked");
+    let icon = "alert";
+    if (sig.status === "invalid") {
+      tone = "bad";
+      text = t("sigInvalid");
+    } else if (sig.status === "valid" && sig.signer) {
+      icon = "seal";
+      const pinned = S.certStore.value.some((x) => x.fingerprint === sig.signer!.fingerprint && x.pinned);
+      if (!sig.signer_matches_from) text = t("sigMismatch", who);
+      else if (sig.trust === "trusted") {
+        tone = "ok";
+        text = t("sigVerified", who);
+      } else if (pinned) {
+        tone = "ok";
+        text = t("sigTrustedByYou", who);
+      } else if (sig.trust === "expired") text = t("sigExpired", who);
+      else text = t("sigUntrusted", who);
+    }
+    sigChip = (
+      <button type="button" class={`sec-chip ${tone}`} aria-expanded={open} onClick={() => setOpen(!open)} title={sig.detail || undefined}>
+        <Icon name={icon} size={14} />
+        <span>{text}</span>
+        <Icon name="chevron" size={13} />
+      </button>
+    );
+  }
+  return (
+    <div class="sec">
+      <div class="sec-row">
+        {enc?.status === "decrypted" && (
+          <span class="sec-chip ok">
+            <Icon name="lock" size={14} />
+            <span>{t("encDecrypted", enc.algorithm)}</span>
+          </span>
+        )}
+        {sigChip}
+      </div>
+      {open && sig?.signer && <CertDetails c={sig.signer} sig={sig} />}
+      {open && sig && !sig.signer && <p class="muted small">{sig.detail}</p>}
+    </div>
+  );
+}
+
+/** Shown instead of the body when an encrypted message cannot be opened. */
+function Locked({ enc }: { enc: S.EncryptionReport }) {
+  const text = enc.status === "no_key" ? t("encNoKey") : enc.status === "not_for_you" ? t("encNotForYou") : t("encFailed");
+  return (
+    <div class="locked">
+      <Icon name="lock" size={30} />
+      <strong>{text}</strong>
+      <span class="muted">{enc.status === "no_key" ? (S.ownKey.value?.invalid ? t("keyInvalid") : t("encNoKeyHint")) : enc.detail}</span>
+      {enc.status === "no_key" && (
+        <button type="button" class="ghost" onClick={() => (S.dialog.value = { kind: "settings", tab: "security" })}>
+          <Icon name="key" size={15} />
+          {t("openSettings")}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function Reader() {
   const id = S.openId.value;
   const v = S.openView.value;
@@ -344,7 +480,7 @@ export function Reader() {
   const [asText, setAsText] = useState(false);
   const [details, setDetails] = useState(false);
   useEffect(() => {
-    setAsText(false);
+    setAsText(S.prefs.value.preferText);
     setDetails(false);
   }, [id]);
   if (!id) {
@@ -479,19 +615,37 @@ export function Reader() {
                 )}
               </div>
             </div>
+            <SecurityStrip v={v} />
             {v.has_html && !asText && v.remote_images && !S.showImages.value && (
               <div class="banner">
                 <Icon name="shield" size={16} />
-                <span>{v.can_load_images ? t("imagesHidden") : t("imagesBlocked")}</span>
-                {v.can_load_images && (
-                  <button type="button" class="link" onClick={() => (S.showImages.value = true)}>
-                    {t("showImages")}
-                  </button>
+                <span>
+                  {!v.can_load_images
+                    ? t("imagesBlocked")
+                    : S.prefs.value.images === "never"
+                      ? t("imagesBlockedSetting")
+                      : v.security?.encrypted
+                        ? t("encryptedImages")
+                        : t("imagesHidden")}
+                </span>
+                {v.can_load_images && S.prefs.value.images !== "never" && (
+                  <>
+                    <button type="button" class="link" onClick={() => (S.showImages.value = true)}>
+                      {t("showImages")}
+                    </button>
+                    {from && !v.security?.encrypted && (
+                      <button type="button" class="link" onClick={() => S.trustSender(from.email)}>
+                        {t("alwaysFromSender", from.email)}
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
             )}
             <div class="body">
-              {v.has_html && !asText ? (
+              {v.security?.encrypted && v.security.encrypted.status !== "decrypted" ? (
+                <Locked enc={v.security.encrypted} />
+              ) : v.has_html && !asText ? (
                 <MailFrame key={`${id}:${S.showImages.value}`} src={S.messageUrl("html", mailbox, id, S.showImages.value ? { images: 1 } : {})} />
               ) : (
                 <PlainText text={v.text} />
@@ -505,7 +659,20 @@ export function Reader() {
                 </div>
                 <div class="chips">
                   {files.map((a) => (
-                    <a key={a.part} class="chip" href={S.messageUrl("part", mailbox, id, { part: a.part })} download={a.name} title={a.name}>
+                    <a
+                      key={a.part}
+                      class="chip"
+                      href={S.messageUrl("part", mailbox, id, { part: a.part })}
+                      download={a.name}
+                      title={a.name}
+                      onClick={(e) => {
+                        // Encrypted messages need the key, which a plain link cannot carry.
+                        if (v.security?.encrypted) {
+                          e.preventDefault();
+                          void S.downloadPart(mailbox, id, a);
+                        }
+                      }}
+                    >
                       <Icon name={a.mime.startsWith("image/") ? "image" : "drafts"} size={18} />
                       <span class="chip-text">
                         <span class="chip-name">{a.name}</span>

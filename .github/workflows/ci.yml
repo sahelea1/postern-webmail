@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
   pull_request:
 
 permissions:
@@ -63,6 +63,9 @@ jobs:
 
       - name: End-to-end over JMAP
         run: tests/e2e.sh jmap
+
+      - name: S/MIME against OpenSSL
+        run: tests/smime.sh
 
   image:
     name: Container image

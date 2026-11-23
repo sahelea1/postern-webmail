@@ -2,8 +2,8 @@ apiVersion: v2
 name: postern
 description: Postern webmail gateway for IMAP and JMAP servers, behind an Ingress with automatic TLS
 type: application
-version: 0.1.2
-appVersion: "0.1.2"
+version: 0.2.0
+appVersion: "0.2.0"
 keywords:
   - webmail
   - imap

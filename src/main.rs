@@ -9,6 +9,7 @@ mod config;
 mod error;
 mod message;
 mod seal;
+mod smime;
 mod state;
 
 use axum::{Router, middleware, routing::get};
@@ -185,7 +186,9 @@ fn run(cfg: Config) -> Result<(), String> {
             "POSTERN_INSECURE_HTTP is set: cookies are sent without the Secure flag. Development only."
         );
     }
-    let state = AppState::new(cfg.clone(), servers, sealer);
+    let trust = smime::Trust::load(cfg.smime_ca_file.as_deref())?;
+    tracing::info!(anchors = trust.len(), "S/MIME trust anchors loaded");
+    let state = AppState::new(cfg.clone(), servers, sealer, trust);
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
